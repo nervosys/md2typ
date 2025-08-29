@@ -3,8 +3,16 @@ use pulldown_cmark::{
 };
 
 /// Markdown → Typst translation.
-/// - Headings, emphasis, links, lists, quotes, tables → Typst
-/// - **Code blocks & inline code are passed through unchanged Markdown**.
+/// Coverage: CommonMark + GFM (tables, task lists, strikethrough, autolinks).
+/// Code blocks & inline code are passed through unchanged as Markdown.
+///
+/// Notes:
+/// - Headings map to Typst: `=`, `==`, …
+/// - Lists: each item starts on its own line; nested items are indented by 2 spaces/level
+/// - Task lists: literal `[ ]` / `[x]` prefix inside the item
+/// - Tables: header row preserved; column alignment mapped (left/center/right/auto)
+/// - Blockquotes: `#quote[ ... ]`
+/// - Footnotes: references `[^id]` become superscripted markers; definitions render at the end.
 pub fn translate(md: &str, with_preamble: bool) -> anyhow::Result<String> {
     let mut opts = Options::empty();
     opts.insert(Options::ENABLE_TABLES);
@@ -28,17 +36,27 @@ pub fn translate(md: &str, with_preamble: bool) -> anyhow::Result<String> {
     }
     let mut list_stack: Vec<ListKind> = Vec::new();
 
+    // Tables
     let mut in_table = false;
+    let mut in_table_head = false;
     let mut table_row: Vec<String> = Vec::new();
     let mut buf = String::new();
 
-    // NEW: track fenced/indented code blocks; when true, we pass text verbatim.
+    // Code
     let mut in_code_block = false;
+
+    // Task list markers
+    let mut pending_task_marker: Option<bool> = None; // Some(true)=checked, Some(false)=unchecked
+
+    // Footnotes: collect whether we're inside a def for prettier rendering
+    let mut in_footnote_def: Option<String> = None;
 
     for ev in parser {
         match ev {
             Event::Start(tag) => match tag {
-                Tag::Paragraph => {}
+                Tag::Paragraph => {
+                    // no-op; content will follow
+                }
                 Tag::Heading { level, .. } => {
                     let n = match level {
                         HeadingLevel::H1 => 1,
@@ -70,7 +88,9 @@ pub fn translate(md: &str, with_preamble: bool) -> anyhow::Result<String> {
                     write_escaped(&mut out, &dest_url);
                     out.push_str(")\n");
                 }
-                Tag::BlockQuote => out.push_str("#quote["),
+                Tag::BlockQuote => {
+                    out.push_str("#quote[");
+                }
                 Tag::List(start) => {
                     if let Some(n) = start {
                         list_stack.push(ListKind::Ordered { index: n });
@@ -79,25 +99,26 @@ pub fn translate(md: &str, with_preamble: bool) -> anyhow::Result<String> {
                     }
                 }
                 Tag::Item => {
-                    if list_stack.is_empty() {
-                        out.push_str("- ");
-                    } else {
-                        match list_stack.last().unwrap() {
-                            ListKind::Bullet => {
-                                out.push_str(&format!("{}- ", "  ".repeat(list_stack.len() - 1)));
-                            }
-                            ListKind::Ordered { index } => {
-                                out.push_str(&format!(
-                                    "{}{}. ",
-                                    "  ".repeat(list_stack.len() - 1),
-                                    index
-                                ));
-                            }
+                    // Start a new line for every item, with proper indentation
+                    let depth = list_stack.len().saturating_sub(1);
+                    out.push('\n');
+                    out.push_str(&"  ".repeat(depth));
+                    match list_stack.last().unwrap_or(&ListKind::Bullet) {
+                        ListKind::Bullet => out.push_str("- "),
+                        ListKind::Ordered { index } => {
+                            out.push_str(&format!("{}. ", index));
+                        }
+                    }
+                    // If a task marker was seen, emit literal checkbox
+                    if let Some(checked) = pending_task_marker.take() {
+                        if checked {
+                            out.push_str("[x] ");
+                        } else {
+                            out.push_str("[ ] ");
                         }
                     }
                 }
                 Tag::CodeBlock(kind) => {
-                    // Pass through Markdown fences unchanged.
                     in_code_block = true;
                     out.push_str("```");
                     if let CodeBlockKind::Fenced(lang) = kind {
@@ -109,6 +130,7 @@ pub fn translate(md: &str, with_preamble: bool) -> anyhow::Result<String> {
                 }
                 Tag::Table(aligns) => {
                     in_table = true;
+                    in_table_head = false;
                     out.push_str("#table(columns: (");
                     for (i, a) in aligns.iter().enumerate() {
                         if i > 0 {
@@ -124,22 +146,39 @@ pub fn translate(md: &str, with_preamble: bool) -> anyhow::Result<String> {
                     }
                     out.push_str("))[\n");
                 }
-                Tag::TableRow => table_row.clear(),
-                Tag::TableCell => buf.clear(),
+                Tag::TableHead => {
+                    in_table_head = true;
+                }
+                Tag::TableRow => {
+                    table_row.clear();
+                }
+                Tag::TableCell => {
+                    buf.clear();
+                }
                 Tag::FootnoteDefinition(name) => {
+                    in_footnote_def = Some(name.to_string());
+                    // Start a footnote definition block. We’ll render as:
+                    // #footnote[#emph[id]: content...]
                     out.push_str("#footnote[#emph[");
                     out.push_str(&escape_inline(name.as_ref()));
                     out.push_str("]: ");
                 }
                 _ => {}
             },
+
             Event::End(tag_end) => match tag_end {
-                TagEnd::Paragraph => out.push_str("\n\n"),
-                TagEnd::Heading { .. } => out.push_str("\n\n"),
-                TagEnd::Emphasis | TagEnd::Strong | TagEnd::Strikethrough | TagEnd::Link => {
-                    out.push(']')
+                TagEnd::Paragraph => {
+                    out.push_str("\n\n");
                 }
-                TagEnd::BlockQuote => out.push_str("]\n\n"),
+                TagEnd::Heading { .. } => {
+                    out.push_str("\n\n");
+                }
+                TagEnd::Emphasis | TagEnd::Strong | TagEnd::Strikethrough | TagEnd::Link => {
+                    out.push(']');
+                }
+                TagEnd::BlockQuote => {
+                    out.push_str("]\n\n");
+                }
                 TagEnd::List(_) => {
                     list_stack.pop();
                     out.push('\n');
@@ -151,21 +190,31 @@ pub fn translate(md: &str, with_preamble: bool) -> anyhow::Result<String> {
                     }
                 }
                 TagEnd::CodeBlock => {
-                    // Close Markdown fence unchanged.
                     in_code_block = false;
                     out.push_str("```\n\n");
                 }
                 TagEnd::Table => {
                     in_table = false;
+                    in_table_head = false;
                     out.push_str("]\n\n");
                 }
+                TagEnd::TableHead => {
+                    in_table_head = false;
+                }
                 TagEnd::TableRow => {
+                    // Flush row: if header, render bold
                     out.push_str("  [");
                     for (i, cell) in table_row.iter().enumerate() {
                         if i > 0 {
                             out.push_str("]  [");
                         }
-                        out.push_str(cell);
+                        if in_table_head {
+                            out.push_str("#strong[");
+                            out.push_str(cell);
+                            out.push(']');
+                        } else {
+                            out.push_str(cell);
+                        }
                     }
                     out.push_str("]\n");
                 }
@@ -173,25 +222,32 @@ pub fn translate(md: &str, with_preamble: bool) -> anyhow::Result<String> {
                     table_row.push(buf.clone());
                     buf.clear();
                 }
-                TagEnd::FootnoteDefinition => out.push_str("]\n"),
+                TagEnd::FootnoteDefinition => {
+                    in_footnote_def = None;
+                    out.push_str("]\n");
+                }
                 _ => {}
             },
+
             Event::Text(t) => {
                 if in_code_block {
-                    // VERBATIM inside fenced code
-                    out.push_str(&t);
+                    out.push_str(&t); // verbatim inside fenced code
                 } else if in_table {
                     buf.push_str(&escape_inline(&t));
+                } else if in_footnote_def.is_some() {
+                    out.push_str(&escape_inline(&t));
                 } else {
                     out.push_str(&escape_inline(&t));
                 }
             }
+
             Event::Code(t) => {
-                // Inline code: pass through unchanged (no escaping)
+                // Inline code: pass through unchanged
                 out.push('`');
                 out.push_str(&t);
                 out.push('`');
             }
+
             Event::SoftBreak => {
                 if in_code_block {
                     out.push('\n');
@@ -206,17 +262,32 @@ pub fn translate(md: &str, with_preamble: bool) -> anyhow::Result<String> {
                     out.push_str(" \\\n");
                 }
             }
-            Event::Rule => out.push_str("#line(length: 100%)\n\n"),
+
+            Event::Rule => {
+                out.push_str("#line(length: 100%)\n\n");
+            }
+
             Event::Html(html) => {
                 if in_code_block {
                     out.push_str(&html);
                 } else {
+                    // Inline HTML as text (best-effort)
                     out.push_str(&escape_inline(&html));
                 }
             }
+
             Event::FootnoteReference(name) => {
-                out.push_str(&format!("[^{}]", escape_inline(&name)));
+                // Render a small superscript marker that links to the footnote label
+                out.push_str("#super[");
+                out.push_str(&escape_inline(&name));
+                out.push(']');
             }
+
+            // Task list marker emitted just before the item text
+            Event::TaskListMarker(checked) => {
+                pending_task_marker = Some(checked);
+            }
+
             _ => {}
         }
     }

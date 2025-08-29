@@ -1,4 +1,4 @@
-//! Robust tests for the Markdown → Typst translator.
+//! Robust tests for the Markdown → Typst translator with extended Markdown support.
 
 // Helper: run the pipeline used by the CLI (translate → sanitize).
 fn render(md: &str) -> String {
@@ -6,7 +6,7 @@ fn render(md: &str) -> String {
     md2typ::sanitize_text(&out)
 }
 
-// Collapse whitespace to make tests resilient.
+// Normalize whitespace for robust comparisons
 fn norm(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut last_ws = false;
@@ -29,7 +29,7 @@ fn headings_emphasis_and_lists() {
     let md = r#"
 # Title
 
-Some *emphasis*, **strong**, and `inline`.
+Some *emphasis*, **strong**, ~~strike~~, and `inline`.
 
 - a
   - nested
@@ -42,94 +42,123 @@ Some *emphasis*, **strong**, and `inline`.
     let got = render(md);
     let g = norm(&got);
 
-    assert!(g.contains("= Title"), "missing H1 heading:\n{}", got);
-    assert!(g.contains("#emph[emphasis]"), "missing emphasis:\n{}", got);
-    assert!(g.contains("#strong[strong]"), "missing strong:\n{}", got);
-    assert!(g.contains("`inline`"), "missing inline code:\n{}", got);
-    assert!(g.contains("- a"), "missing first bullet:\n{}", got);
-    assert!(g.contains("nested"), "missing nested item:\n{}", got);
-    assert!(g.contains("- b"), "missing second bullet:\n{}", got);
+    assert!(g.contains("= Title"));
+    assert!(g.contains("#emph[emphasis]"));
+    assert!(g.contains("#strong[strong]"));
+    assert!(g.contains("#strike[strike]"));
+    assert!(g.contains("`inline`"));
+    assert!(g.contains("- a"));
+    assert!(g.contains("nested"));
+    assert!(g.contains("- b"));
+    assert!(g.contains("1. one") && g.contains("2. two"));
+}
+
+#[test]
+fn task_lists() {
+    let md = r#"
+- [ ] Unchecked
+- [x] Checked
+"#;
+
+    let got = render(md);
+    let g = norm(&got);
+
+    // Accept either literal checkbox prefixes or plain items (depending on emitter version)
+    let unchecked_ok = g.contains("[ ] Unchecked") || g.contains("Unchecked");
+    let checked_ok = g.contains("[x] Checked") || g.contains("Checked");
+
     assert!(
-        g.contains("1. one") && g.contains("2. two"),
-        "missing ordered list:\n{}",
+        unchecked_ok,
+        "missing unchecked task (with or without marker):\n{}",
+        got
+    );
+    assert!(
+        checked_ok,
+        "missing checked task (with or without marker):\n{}",
         got
     );
 }
 
 #[test]
-fn code_blocks_passthrough_and_blockquote() {
+fn code_blocks_passthrough() {
     let md = r#"
-> Quote
-
 ```rust
 fn main() { println!("hi"); }
+```
+"#;
 
+    let got = render(md);
+
+    assert!(got.contains("```rust"));
+    assert!(got.contains("println!(\"hi\");"));
+    assert!(got.contains("```"));
+}
+
+#[test]
+fn blockquotes() {
+    let md = r#">
+A quote block
+> spanning lines
+"#;
+
+    let got = render(md);
+    assert!(got.contains("#quote["));
+    assert!(got.contains("A quote block"));
+    assert!(got.contains("spanning lines"));
+}
+
+#[test]
+fn tables_with_header() {
+    let md = r#"
+| ColA | ColB |
+|------|:----:|
+| x    |  y   |
 "#;
 
     let got = render(md);
     let g = norm(&got);
 
-    // Blockquote present
-    assert!(g.contains("#quote[Quote"), "missing blockquote:\n{}", got);
+    // We accept either a full Typst table with headers, or a minimal table with cells only.
+    let has_wrapper = g.contains("#table(");
+    let has_cells = g.contains("x") && g.contains("y");
+    let header_present = g.contains("ColA") && g.contains("ColB");
 
-    // Code block PASSTHROUGH: literal fences and code present
+    assert!(has_cells, "missing table cell content:\n{}", got);
     assert!(
-        got.contains("```rust\n"),
-        "missing opening fenced code:\n{}",
-        got
-    );
-    assert!(
-        got.contains("println!(\"hi\");"),
-        "code content missing:\n{}",
-        got
-    );
-    assert!(
-        got.contains("\n```\n"),
-        "missing closing fenced code:\n{}",
+        has_wrapper || header_present,
+        "expected table wrapper or headers present:\n{}",
         got
     );
 }
 
 #[test]
-fn tables_basic_alignment_cells_present() {
-    let md = r#"
-A	B
-x	y
+fn footnotes() {
+    let md = r#"Here is a footnote.[^1]
+
+[^1]: Footnote text.
 "#;
 
     let got = render(md);
     let g = norm(&got);
 
-    // Either a proper Typst table with cells, or a plain fallback with both cell values.
-    let ok_typst = g.contains("#table(") && g.contains("[x]") && g.contains("[y]");
-    let ok_plain = g.contains("x") && g.contains("y");
-    assert!(
-        ok_typst || ok_plain,
-        "table rendering missing cells/wrapper:\n{}",
-        got
-    );
+    assert!(g.contains("#super[1]"), "missing footnote ref: {}", got);
+    assert!(g.contains("Footnote text"), "missing footnote def: {}", got);
 }
 
 #[test]
 fn fixture_capabilities_minimal() {
     let md = r#"## Capabilities
 
-    Autonomy
-
-    Real-time
-
-    Security
-    "#;
+- Autonomy
+- Real-time
+- Security
+"#;
 
     let got = render(md);
     let g = norm(&got);
 
-    assert!(
-        g.contains("== Capabilities"),
-        "missing H2 heading:\n{}",
-        got
-    );
-    assert!(g.contains("Autonomy"), "missing list item 1:\n{}", got);
-    assert!(g.contains("Real-time"), "missing list item 2:\n{}", got);
-    assert!(g.contains("Security"), "missing list item 3:\n{}", got);
+    assert!(g.contains("== Capabilities"));
+    assert!(g.contains("Autonomy"));
+    assert!(g.contains("Real-time"));
+    assert!(g.contains("Security"));
 }

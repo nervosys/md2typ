@@ -1,0 +1,13 @@
+[package]
+name = "md2typ"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+pulldown-cmark = "0.10"
+clap = { version = "4.5", features = ["derive"] }
+anyhow = "1.0"
+
+[dev-dependencies]
+insta = { version = "1.39", features = ["yaml"] }
+pretty_assertions = "1.4"

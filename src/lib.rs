@@ -3,16 +3,16 @@ use pulldown_cmark::{
 };
 
 /// Markdown → Typst translation.
-/// Coverage: CommonMark + GFM (tables, task lists, strikethrough, autolinks).
-/// Code blocks & inline code are passed through unchanged as Markdown.
+/// Coverage: CommonMark + GFM (tables, strikethrough, task lists, footnotes).
+/// Code blocks & inline code are passed through unchanged as Markdown fenced blocks.
 ///
-/// Notes:
-/// - Headings map to Typst: `=`, `==`, …
-/// - Lists: each item starts on its own line; nested items are indented by 2 spaces/level
-/// - Task lists: literal `[ ]` / `[x]` prefix inside the item
-/// - Tables: header row preserved; column alignment mapped (left/center/right/auto)
-/// - Blockquotes: `#quote[ ... ]`
-/// - Footnotes: references `[^id]` become superscripted markers; definitions render at the end.
+/// Mapping notes:
+/// - Headings: `H1..H6` → `=`, `==`, …, `======`
+/// - Lists: each item starts on its own physical line; nested items indented by two spaces / depth
+/// - Task lists: literal `[ ]` / `[x]` inside the item text (no Typst widget)
+/// - Tables: header preserved; alignments mapped to Typst (`left|center|right|auto`)
+/// - Links: `#link("dest")[text]`; **display text escapes `@`** as `\@`
+/// - Footnotes: references render as `#super[id]`; definitions as `#footnote[#emph[id]: …]`
 pub fn translate(md: &str, with_preamble: bool) -> anyhow::Result<String> {
     let mut opts = Options::empty();
     opts.insert(Options::ENABLE_TABLES);
@@ -36,26 +36,29 @@ pub fn translate(md: &str, with_preamble: bool) -> anyhow::Result<String> {
     }
     let mut list_stack: Vec<ListKind> = Vec::new();
 
-    // Tables
+    // Table state
     let mut in_table = false;
     let mut in_table_head = false;
     let mut table_row: Vec<String> = Vec::new();
-    let mut buf = String::new();
+    let mut buf = String::new(); // cell buffer
 
-    // Code
+    // Code state
     let mut in_code_block = false;
 
-    // Task list markers
-    let mut pending_task_marker: Option<bool> = None; // Some(true)=checked, Some(false)=unchecked
+    // Link state
+    let mut in_link = false;
 
-    // Footnotes: collect whether we're inside a def for prettier rendering
+    // Task list markers
+    let mut pending_task_marker: Option<bool> = None; // Some(true)=checked
+
+    // Footnotes
     let mut in_footnote_def: Option<String> = None;
 
     for ev in parser {
         match ev {
             Event::Start(tag) => match tag {
                 Tag::Paragraph => {
-                    // no-op; content will follow
+                    // no-op; text follows
                 }
                 Tag::Heading { level, .. } => {
                     let n = match level {
@@ -75,22 +78,23 @@ pub fn translate(md: &str, with_preamble: bool) -> anyhow::Result<String> {
                 Tag::Link {
                     dest_url, title, ..
                 } => {
-                    out.push_str("#link(");
-                    write_escaped(&mut out, &dest_url);
+                    let dst: &mut String = if in_table { &mut buf } else { &mut out };
+                    dst.push_str("#link(");
+                    write_escaped(dst, &dest_url);
                     if !title.is_empty() {
-                        out.push_str(", title: ");
-                        write_string_literal(&mut out, &title);
+                        dst.push_str(", title: ");
+                        write_string_literal(dst, &title);
                     }
-                    out.push_str(")[");
+                    dst.push_str(")["); // display text comes later via Event::Text
+                    in_link = true;
                 }
                 Tag::Image { dest_url, .. } => {
-                    out.push_str("#image(");
-                    write_escaped(&mut out, &dest_url);
-                    out.push_str(")\n");
+                    let dst: &mut String = if in_table { &mut buf } else { &mut out };
+                    dst.push_str("#image(");
+                    write_escaped(dst, &dest_url);
+                    dst.push_str(")\n");
                 }
-                Tag::BlockQuote => {
-                    out.push_str("#quote[");
-                }
+                Tag::BlockQuote => out.push_str("#quote["),
                 Tag::List(start) => {
                     if let Some(n) = start {
                         list_stack.push(ListKind::Ordered { index: n });
@@ -99,7 +103,7 @@ pub fn translate(md: &str, with_preamble: bool) -> anyhow::Result<String> {
                     }
                 }
                 Tag::Item => {
-                    // Start a new line for every item, with proper indentation
+                    // Separate items clearly; indent by depth-1
                     let depth = list_stack.len().saturating_sub(1);
                     out.push('\n');
                     out.push_str(&"  ".repeat(depth));
@@ -109,7 +113,6 @@ pub fn translate(md: &str, with_preamble: bool) -> anyhow::Result<String> {
                             out.push_str(&format!("{}. ", index));
                         }
                     }
-                    // If a task marker was seen, emit literal checkbox
                     if let Some(checked) = pending_task_marker.take() {
                         if checked {
                             out.push_str("[x] ");
@@ -157,8 +160,6 @@ pub fn translate(md: &str, with_preamble: bool) -> anyhow::Result<String> {
                 }
                 Tag::FootnoteDefinition(name) => {
                     in_footnote_def = Some(name.to_string());
-                    // Start a footnote definition block. We’ll render as:
-                    // #footnote[#emph[id]: content...]
                     out.push_str("#footnote[#emph[");
                     out.push_str(&escape_inline(name.as_ref()));
                     out.push_str("]: ");
@@ -167,42 +168,51 @@ pub fn translate(md: &str, with_preamble: bool) -> anyhow::Result<String> {
             },
 
             Event::End(tag_end) => match tag_end {
-                TagEnd::Paragraph => {
-                    out.push_str("\n\n");
+                TagEnd::Paragraph => out.push_str("\n\n"),
+
+                TagEnd::Heading { .. } => out.push_str("\n\n"),
+
+                // Close inline style blocks (NOT links)
+                TagEnd::Emphasis | TagEnd::Strong | TagEnd::Strikethrough => out.push(']'),
+
+                // Close link (unit variant in pulldown-cmark 0.10)
+                TagEnd::Link => {
+                    let dst: &mut String = if in_table { &mut buf } else { &mut out };
+                    dst.push(']');
+                    in_link = false;
                 }
-                TagEnd::Heading { .. } => {
-                    out.push_str("\n\n");
-                }
-                TagEnd::Emphasis | TagEnd::Strong | TagEnd::Strikethrough | TagEnd::Link => {
-                    out.push(']');
-                }
-                TagEnd::BlockQuote => {
-                    out.push_str("]\n\n");
-                }
+
+                TagEnd::BlockQuote => out.push_str("]\n\n"),
+
                 TagEnd::List(_) => {
                     list_stack.pop();
                     out.push('\n');
                 }
+
                 TagEnd::Item => {
                     out.push('\n');
                     if let Some(ListKind::Ordered { index }) = list_stack.last_mut() {
                         *index += 1;
                     }
                 }
+
                 TagEnd::CodeBlock => {
                     in_code_block = false;
                     out.push_str("```\n\n");
                 }
+
                 TagEnd::Table => {
                     in_table = false;
                     in_table_head = false;
                     out.push_str("]\n\n");
                 }
+
                 TagEnd::TableHead => {
                     in_table_head = false;
                 }
+
                 TagEnd::TableRow => {
-                    // Flush row: if header, render bold
+                    // flush the row
                     out.push_str("  [");
                     for (i, cell) in table_row.iter().enumerate() {
                         if i > 0 {
@@ -218,26 +228,42 @@ pub fn translate(md: &str, with_preamble: bool) -> anyhow::Result<String> {
                     }
                     out.push_str("]\n");
                 }
+
                 TagEnd::TableCell => {
                     table_row.push(buf.clone());
                     buf.clear();
                 }
+
                 TagEnd::FootnoteDefinition => {
                     in_footnote_def = None;
                     out.push_str("]\n");
                 }
+
                 _ => {}
             },
 
             Event::Text(t) => {
                 if in_code_block {
-                    out.push_str(&t); // verbatim inside fenced code
+                    // verbatim inside fenced code
+                    out.push_str(&t);
                 } else if in_table {
-                    buf.push_str(&escape_inline(&t));
+                    if in_link {
+                        buf.push_str(&escape_inline_with_at(&t));
+                    } else {
+                        buf.push_str(&escape_inline(&t));
+                    }
                 } else if in_footnote_def.is_some() {
-                    out.push_str(&escape_inline(&t));
+                    if in_link {
+                        out.push_str(&escape_inline_with_at(&t));
+                    } else {
+                        out.push_str(&escape_inline(&t));
+                    }
                 } else {
-                    out.push_str(&escape_inline(&t));
+                    if in_link {
+                        out.push_str(&escape_inline_with_at(&t));
+                    } else {
+                        out.push_str(&escape_inline(&t));
+                    }
                 }
             }
 
@@ -251,39 +277,48 @@ pub fn translate(md: &str, with_preamble: bool) -> anyhow::Result<String> {
             Event::SoftBreak => {
                 if in_code_block {
                     out.push('\n');
+                } else if in_table {
+                    buf.push(' ');
                 } else {
                     out.push(' ');
                 }
             }
+
             Event::HardBreak => {
                 if in_code_block {
                     out.push('\n');
+                } else if in_table {
+                    buf.push_str(" \\\n");
                 } else {
                     out.push_str(" \\\n");
                 }
             }
 
-            Event::Rule => {
-                out.push_str("#line(length: 100%)\n\n");
-            }
+            Event::Rule => out.push_str("#line(length: 100%)\n\n"),
 
             Event::Html(html) => {
+                // Best-effort: escape as text unless in code
                 if in_code_block {
                     out.push_str(&html);
+                } else if in_table {
+                    buf.push_str(&escape_inline(&html));
                 } else {
-                    // Inline HTML as text (best-effort)
                     out.push_str(&escape_inline(&html));
                 }
             }
 
             Event::FootnoteReference(name) => {
-                // Render a small superscript marker that links to the footnote label
-                out.push_str("#super[");
-                out.push_str(&escape_inline(&name));
-                out.push(']');
+                if in_table {
+                    buf.push_str("#super[");
+                    buf.push_str(&escape_inline(&name));
+                    buf.push(']');
+                } else {
+                    out.push_str("#super[");
+                    out.push_str(&escape_inline(&name));
+                    out.push(']');
+                }
             }
 
-            // Task list marker emitted just before the item text
             Event::TaskListMarker(checked) => {
                 pending_task_marker = Some(checked);
             }
@@ -295,7 +330,7 @@ pub fn translate(md: &str, with_preamble: bool) -> anyhow::Result<String> {
     Ok(out)
 }
 
-/// Keep LF/TAB; drop other control chars that sometimes confuse tools.
+/// Keep LF/TAB; drop other C0 controls (prevents odd “invalid utf-8” reports by tools).
 pub fn sanitize_text(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for ch in s.chars() {
@@ -308,6 +343,7 @@ pub fn sanitize_text(s: &str) -> String {
     out
 }
 
+/// Escape inline Typst-breaking characters: `#`, `[`, `]`, `\`.
 fn escape_inline(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 8);
     for ch in s.chars() {
@@ -322,7 +358,24 @@ fn escape_inline(s: &str) -> String {
     out
 }
 
-fn write_escaped(dst: &mut String, s: &CowStr) {
+/// Escape inline for link display text, also escaping `@` → `\@` (important for Typst).
+fn escape_inline_with_at(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 8);
+    for ch in s.chars() {
+        match ch {
+            '@' => out.push_str("\\@"),
+            '#' | '[' | ']' | '\\' => {
+                out.push('\\');
+                out.push(ch);
+            }
+            _ => out.push(ch),
+        }
+    }
+    out
+}
+
+/// Write a Typst string literal with escapes for `"` and `\`.
+fn write_string_literal(dst: &mut String, s: &str) {
     dst.push('"');
     for ch in s.chars() {
         match ch {
@@ -334,7 +387,8 @@ fn write_escaped(dst: &mut String, s: &CowStr) {
     dst.push('"');
 }
 
-fn write_string_literal(dst: &mut String, s: &str) {
+/// Write a Typst string literal from a `CowStr` (URL, etc.).
+fn write_escaped(dst: &mut String, s: &CowStr) {
     dst.push('"');
     for ch in s.chars() {
         match ch {

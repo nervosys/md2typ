@@ -38,3 +38,9 @@ cargo test
 ./target/release/md2typ TEST.md --output test.typ
 typst compile test.typ test.pdf
 ```
+
+Install `md2typ` binary to your path:
+
+```shell
+cargo install --path .
+```

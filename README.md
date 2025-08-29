@@ -1,4 +1,4 @@
-# md2typ: Markdown → Typst translator
+# `md2typ`: Markdown → Typst Translator
 
 A small Rust CLI tool that converts Markdown documents into Typst markup.  
 It’s useful if you want to keep writing in Markdown but generate clean Typst for typesetting and PDF export.

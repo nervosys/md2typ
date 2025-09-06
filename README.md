@@ -14,6 +14,8 @@
 - **Smart CLI**:
   - `--output out.typ` → emits Typst source
   - `--output out.pdf` → compiles directly to PDF (auto-installs Typst if missing)
+  - `--template file.typ` → applies custom Typst template for advanced styling
+- **Template support**: Use custom Typst templates for professional formatting
 
 ## Installation
 
@@ -61,10 +63,11 @@ ARGS:
     <INPUT>    Input Markdown file (default: stdin)
 
 OPTIONS:
-    -o, --output <PATH>   Output file: .typ (Typst source) or .pdf (compiled)
-        --preamble        Add a simple Typst preamble at top
-    -h, --help            Print help
-    -V, --version         Print version
+    -o, --output <PATH>       Output file: .typ (Typst source) or .pdf (compiled)
+        --preamble            Add a simple Typst preamble at top
+    -t, --template <PATH>     Use a Typst template file (overrides --preamble)
+    -h, --help                Print help
+    -V, --version             Print version
 ```
 
 ## Examples
@@ -85,6 +88,12 @@ Pipe Markdown from stdin:
 
 ```bash
 cat notes.md | md2typ --output notes.pdf
+```
+
+Use a custom template for professional formatting:
+
+```bash
+md2typ report.md --template examples/templates/academic.typ --output report.pdf
 ```
 
 ## Development
@@ -111,7 +120,7 @@ cargo clippy --all-targets --all-features -- -D warnings
 
 - [ ] Improve Typst table rendering
 - [ ] Add more configurable preamble options
-- [ ] Allow themes/templates for PDF output
+- [x] Allow themes/templates for PDF output
 - [ ] CI/CD builds & release binaries
 
 ## Contributing

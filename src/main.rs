@@ -24,6 +24,10 @@ struct Cli {
     /// Add a simple Typst preamble at top
     #[arg(long)]
     preamble: bool,
+
+    /// Use a Typst template file (overrides --preamble)
+    #[arg(short, long)]
+    template: Option<PathBuf>,
 }
 
 fn main() -> Result<()> {
@@ -39,8 +43,24 @@ fn main() -> Result<()> {
     };
     let md = md.replace("\r\n", "\n").replace('\r', "\n");
 
+    // ---- Handle template or preamble ----
+    let template_content = if let Some(template_path) = &cli.template {
+        Some(read_template_file(template_path)?)
+    } else {
+        None
+    };
+
+    // Template overrides preamble
+    let use_preamble = template_content.is_none() && cli.preamble;
+
     // ---- Translate to Typst ----
-    let mut typ = md2typ::translate(&md, cli.preamble)?;
+    let mut typ = md2typ::translate(&md, use_preamble)?;
+    
+    // If we have a template, prepend it to the content
+    if let Some(template) = template_content {
+        typ = format!("{}\n\n{}", template, typ);
+    }
+    
     typ = md2typ::sanitize_text(&typ);
 
     match &cli.output {
@@ -66,6 +86,17 @@ fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Read and validate a Typst template file.
+fn read_template_file(template_path: &Path) -> Result<String> {
+    let content = fs::read_to_string(template_path)
+        .with_context(|| format!("failed to read template file {}", template_path.display()))?;
+    
+    // Normalize line endings
+    let content = content.replace("\r\n", "\n").replace('\r', "\n");
+    
+    Ok(content)
 }
 
 /// Ensure Typst is on PATH; if not, `cargo install typst`.
